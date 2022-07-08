@@ -1,0 +1,273 @@
+### Infos : stack préparée pour zone Europe (Paris) soit zones de dispo eu-west-3a, eu-west-3b et eu-west-3c.
+### Si vous utilisez une autre zone, il faudra adapter la stack lignes 64 et 74
+### Instance utilisée : ami-0b3e57ee3b63dd76b (valide au 28/05/21), vérifier avant l'ID de la 1ère ami disponible en free-tier
+### Pour connecter votre VPN à AWS, il faut le faire manuellement en récupérant le fichier de configuration dans "Connexion VPN site à site"
+### Durée moyenne de déploiement de cette stack : 5 minutes
+
+
+
+### Déclaration des paramètres avant le lancement de la pile ###
+Parameters:
+  KeyName:
+    Description: Nom de la paire de cle pour l'acces aux instances EC2 via SSH (a creer manuellement en amont)
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Default: 'choisir une paire de cle existante'
+  LanIPPub:
+    Description: Adresse IP publique de l'entreprise
+    Type: String
+    Default: 'a saisir'
+  LanNetwork:
+    Description: Adresse du reseau local de l'entreprise a joindre via le VPN (CIDR Block)
+    Type: String
+    Default: '192.168.1.0/24'
+  VPCAddress:
+    Description: Adresse du VPC a creer (CIDR Block)
+    Type: String
+    Default: '172.16.0.0/16'
+  PrivateNetwork:
+    Description: Adresse du sous-reseau prive a creer (CIDR Block)
+    Type: String
+    Default: '172.16.1.0/24'
+  PublicNetwork:
+    Description: Adresse du sous-reseau public a creer (CIDR Block)
+    Type: String
+    Default: '172.16.0.0/24'
+  AMIID:
+    Description: ID de l'instance EC2 (AMI) a creer pour l'intranet
+    Type: String
+    Default: 'ami-0b3e57ee3b63dd76b'
+  IPIntranet:
+    Description: IP a definir pour l'instance intranet situee dans le subnet prive
+    Type: String
+    Default: '172.16.1.80' 
+
+
+### Création des ressources nécessaires à l'infrastructure ###
+Resources: 
+## Réseaux ##
+# VPC
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !Ref VPCAddress
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+      - Key: Name
+        Value: 'vpc-infra'
+
+# Sous-réseaux
+  PrivateSubnet:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId:
+        Ref: VPC
+      AvailabilityZone: eu-west-3c
+      CidrBlock: !Ref PrivateNetwork
+      Tags:
+      - Key: Name
+        Value: 'sub-priv-infra'
+  PublicSubnet:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId:
+        Ref: VPC
+      AvailabilityZone: eu-west-3a
+      CidrBlock: !Ref PublicNetwork
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: 'sub-pub-infra'
+
+# Passerelle Internet
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: 'infra-igw'
+  AttachInternetGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+# Passerelles NAT
+  NatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NatGateway:
+    DependsOn: AttachInternetGateway
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: 'infra-gwnat'
+
+# Tables de routage
+  RouteTablePrivateSubnet:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'infra-route-pv-sub'
+  RouteTablePublicSubnet:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'infra-route-pub-sub'  
+
+# Routes
+  RoutePrivateSubnetVPNAccess:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref RouteTablePrivateSubnet
+      DestinationCidrBlock: !Ref LanNetwork
+      GatewayId: !Ref VPNGateway 
+    DependsOn: 'AttachVpnGateway'   
+  RoutePrivateSubnetWanAccess:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref RouteTablePrivateSubnet
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+    DependsOn: 'NatEip' 
+  RoutePublicSubnet:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref RouteTablePublicSubnet
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+    DependsOn: 'InternetGateway' 
+    DependsOn: 'AttachInternetGateway'
+
+# Association des tables de routage aux sous-réseaux
+  PrivateSubnetRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref RouteTablePrivateSubnet
+    DependsOn:
+      - PrivateSubnet
+      - RouteTablePrivateSubnet
+  PublicSubnetRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTablePublicSubnet
+    DependsOn:
+      - PublicSubnet
+      - RouteTablePublicSubnet
+
+
+## Groupes de sécurité ##
+#Réseaux publiques
+  SecGrpPub:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: HTTP and SSH
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0 
+      VpcId: !Ref VPC
+      Tags:
+       - Key: Name
+         Value: 'infra-grp-sec-pub'
+   
+# Réseau privé
+  SecGrpPriv:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: HTTP and SSH
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: '-1'
+          ToPort: '-1'
+          CidrIp: !Ref LanNetwork
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: !Ref LanNetwork
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: !Ref LanNetwork		  
+      VpcId: !Ref VPC
+      Tags:
+       - Key: Name
+         Value: 'infra-grp-sec-priv'
+
+
+## VPN ##
+  CustomerGateway: 
+    Type: 'AWS::EC2::CustomerGateway'
+    Properties: 
+      Type: ipsec.1
+      BgpAsn: 65000
+      IpAddress: !Ref LanIPPub
+      Tags:
+      - Key: Name
+        Value: 'lan-gw'
+  VPNGateway: 
+    Type: 'AWS::EC2::VPNGateway'
+    Properties: 
+      Type: ipsec.1
+      Tags:
+      - Key: Name
+        Value: 'vpn-gw'
+  AttachVpnGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      VpnGatewayId: !Ref VPNGateway
+  VPNConnection: 
+    Type: 'AWS::EC2::VPNConnection'
+    Properties: 
+      Type: ipsec.1
+      StaticRoutesOnly: true
+      CustomerGatewayId: !Ref CustomerGateway
+      VpnGatewayId: !Ref VPNGateway
+      Tags:
+       - Key: Name
+         Value: 'vpn-aws-to-lan'        
+  ConnectionRoute: 
+    Type: 'AWS::EC2::VPNConnectionRoute'
+    Properties: 
+      DestinationCidrBlock: !Ref LanNetwork
+      VpnConnectionId: !Ref VPNConnection
+
+
+## Instance Intranet ##
+  IntranetEC2: 
+    Type: 'AWS::EC2::Instance'
+    DependsOn: ConnectionRoute
+    Properties:
+      ImageId: !Ref AMIID
+      InstanceType: t2.micro
+      PrivateIpAddress: !Ref IPIntranet
+      KeyName: !Ref KeyName 
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SecGrpPriv
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            yum install httpd cifs-utils.x86_64 -y
+            systemctl enable httpd.service
+            systemctl restart httpd.service
+      Tags:
+      - Key: Name
+        Value: 'Intranet' 

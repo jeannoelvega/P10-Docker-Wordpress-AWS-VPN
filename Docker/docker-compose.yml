@@ -1,0 +1,18 @@
+version: "3.8"
+services:
+  wordpress:
+    image: jeannoelvega63/jnvwordpress:latest
+    restart: always
+    ports:
+     - 80:80
+     - 3306:3306
+    environment:
+      WORDPRESS_DB_HOST: wordpress.con8jfqs2ku4.eu-west-3.rds.amazonaws.com:3306
+      WORDPRESS_DB_USER: admin
+      WORDPRESS_DB_PASSWORD: M4R5UP1L4M1
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+     - wordpress:/var/www/html
+       
+volumes:
+  wordpress: {}
